@@ -69,8 +69,15 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
     @Override
     public ConfirmOrderResult generateConfirmOrder(List<Long> cartIds) {
         ConfirmOrderResult result = new ConfirmOrderResult();
+
+        /*71-91
+        * 生成订单确认信息 通过各个实现类的方法填充ConfirmOrderResult信息（currentMember）
+        *
+        */
+
+
         //获取购物车信息
-        UmsMember currentMember = memberService.getCurrentMember();
+        UmsMember currentMember = memberService.getCurrentMember();//现在是当前登录会员
         List<CartPromotionItem> cartPromotionItemList = cartItemService.listPromotion(currentMember.getId(),cartIds);
         result.setCartPromotionItemList(cartPromotionItemList);
         //获取用户收货地址列表
@@ -89,7 +96,13 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         result.setCalcAmount(calcAmount);
         return result;
     }
-
+/*
+*有了订单信息之后对订单进行处理：1.收货地址确认 2.获取订单信息 3.订单内商品的库存处理 ->没库存直接fail ->有库存计算积分和优惠券后锁定库存
+* 4.对订单金额进行支付处理 5.生成订单并将订单相关信息插入数据库，修改订单状态 6.对购物车，优惠券，积分进行更新
+*
+*106-263
+*
+* */
     @Override
     public Map<String, Object> generateOrder(OrderParam orderParam) {
         List<OmsOrderItem> orderItemList = new ArrayList<>();
@@ -169,6 +182,7 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         order.setTotalAmount(calcTotalAmount(orderItemList));
         order.setFreightAmount(new BigDecimal(0));
         order.setPromotionAmount(calcPromotionAmount(orderItemList));
+        //订单优惠信息 ：优惠券、积分、活动优惠
         order.setPromotionInfo(getOrderPromotionInfo(orderItemList));
         if (orderParam.getCouponId() == null) {
             order.setCouponAmount(new BigDecimal(0));
@@ -248,6 +262,11 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         result.put("orderItemList", orderItemList);
         return result;
     }
+    /*270-283
+    * 支付成功后对订单状态的修改
+    * 尤其注意库存问题 恢复锁定库存 扣减真实库存
+    *
+    * */
 
     @Override
     public Integer paySuccess(Long orderId, Integer payType) {
@@ -263,6 +282,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         int count = portalOrderDao.updateSkuStock(orderDetail.getOrderItemList());
         return count;
     }
+    /*
+    *
+    * */
 
     @Override
     public Integer cancelTimeOutOrder() {
@@ -292,7 +314,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         }
         return timeOutOrders.size();
     }
-
+/*
+* 取消单个超时订单
+* */
     @Override
     public void cancelOrder(Long orderId) {
         //查询未付款的取消订单
@@ -323,7 +347,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
             }
         }
     }
-
+/*
+* 发送延迟消息取消订单
+* */
     @Override
     public void sendDelayMessageCancelOrder(Long orderId) {
         //获取订单超时时间
@@ -332,7 +358,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         //发送延迟消息
         cancelOrderSender.sendMessage(orderId, delayTimes);
     }
-
+/*
+* 确认订单收货
+* */
     @Override
     public void confirmReceiveOrder(Long orderId) {
         UmsMember member = memberService.getCurrentMember();
@@ -348,7 +376,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         order.setReceiveTime(new Date());
         orderMapper.updateByPrimaryKey(order);
     }
-
+/*
+*
+* */
     @Override
     public CommonPage<OmsOrderDetail> list(Integer status, Integer pageNum, Integer pageSize) {
         if(status==-1){
@@ -391,7 +421,8 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         resultPage.setList(orderDetailList);
         return resultPage;
     }
-
+/*
+* */
     @Override
     public OmsOrderDetail detail(Long orderId) {
         OmsOrder omsOrder = orderMapper.selectByPrimaryKey(orderId);
@@ -403,7 +434,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         orderDetail.setOrderItemList(orderItemList);
         return orderDetail;
     }
-
+/*
+删除订单
+* */
     @Override
     public void deleteOrder(Long orderId) {
         UmsMember member = memberService.getCurrentMember();
@@ -418,7 +451,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
             Asserts.fail("只能删除已完成或已关闭的订单！");
         }
     }
-
+/*
+* 支付成功后的回调
+* */
     @Override
     public void paySuccessByOrderSn(String orderSn, Integer payType) {
         OmsOrder order = getOrderByOrderSn(orderSn);
@@ -426,7 +461,9 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
             this.paySuccess(order.getId(),payType);
         }
     }
-
+/*
+* 根据orderSn来获取订单
+* */
     @Override
     public OmsOrder getOrderByOrderSn(String orderSn) {
         OmsOrderExample example =  new OmsOrderExample();
@@ -567,7 +604,6 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         }
         return integrationAmount;
     }
-
     /**
      * 计算订单优惠券金额
      */
@@ -580,7 +616,6 @@ public class OmsPortalOrderServiceImpl implements OmsPortalOrderService {
         }
         return couponAmount;
     }
-
     /**
      * 计算订单活动优惠
      */
