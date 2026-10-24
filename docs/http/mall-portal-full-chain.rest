@@ -1,0 +1,120 @@
+@baseUrl = http://localhost:8085
+@addressId = 4
+
+### ============================================================
+### mall-portal 全链路手动验证（VS Code REST Client）
+### 用法：
+###   1. VS Code 安装扩展 Rest Client (humao.rest-client) —— 免费
+###   2. 打开本文件，每条 "###" 分隔的请求上方会出现 "Send Request"
+###   3. 按 1 → 12 顺序依次点击，变量（token/cartId/orderId）自动从上次响应取值
+### ============================================================
+
+### 0. 健康检查（期望 {"status":"UP"}）
+GET {{baseUrl}}/actuator/health
+
+### 1. 会员登录（test/123456）→ 后面请求自动用它的 token
+# @name login
+POST {{baseUrl}}/sso/login
+Content-Type: application/x-www-form-urlencoded
+
+username=test&password=123456
+
+### 2. 收货地址列表（确认默认地址 id=4；若不是，把文件顶部 @addressId 改成你的）
+# @name addressList
+GET {{baseUrl}}/member/address/list
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+### 3. 商品搜索
+GET {{baseUrl}}/product/search?keyword=手机&pageNum=1&pageSize=2
+
+### 4. 商品详情（确认 SKU 99 / price 2999.00 / stock 100）
+GET {{baseUrl}}/product/detail/27
+
+### 5. 加购物车（body 必须带 price/productName 等，否则确认单会 NPE）
+POST {{baseUrl}}/cart/add
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+{
+  "productId": 27,
+  "productSkuId": 99,
+  "quantity": 1,
+  "price": 2999.00,
+  "productName": "小米8 全面屏游戏智能手机 6GB+64GB 黑色 全网通4G 双卡双待",
+  "productSubTitle": "骁龙845处理器，红外人脸解锁",
+  "productPic": "http://macro-oss.oss-cn-shenzhen.aliyuncs.com/mall/images/20180615/xiaomi.jpg",
+  "productAttr": "颜色:黑色;内存:6GB+64GB"
+}
+
+### 6. 购物车列表 → 取新增条目 id（已清空过，data[0] 就是刚加的）
+# @name cartList
+GET {{baseUrl}}/cart/list
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+### 7. 确认订单（结算页）→ 看 payAmount=2999.00
+POST {{baseUrl}}/order/generateConfirmOrder
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+[{{cartList.response.body.$.data[0].id}}]
+
+### 8. 生成订单（核心步骤）
+### 观察：status=0；DB pms_sku_stock.lock_stock 0→1；RabbitMQ mall.order.cancel.ttl 出现 1 条
+### 注意：不用优惠券时不要传 couponId（传 0 会报"该优惠券不可用"）
+# @name createOrder
+POST {{baseUrl}}/order/generateOrder
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+{
+  "cartIds": [{{cartList.response.body.$.data[0].id}}],
+  "memberReceiveAddressId": {{addressId}},
+  "useIntegration": 0,
+  "payType": 0
+}
+
+### 9. 模拟支付成功 → 观察 status 0→1、stock 100→99、lock_stock 1→0
+POST {{baseUrl}}/order/paySuccess?orderId={{createOrder.response.body.$.data.order.id}}&payType=0
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+### 10. 第二单：再加购一次（用于验证取消并释放库存）
+POST {{baseUrl}}/cart/add
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+{
+  "productId": 27,
+  "productSkuId": 99,
+  "quantity": 1,
+  "price": 2999.00,
+  "productName": "小米8 全面屏游戏智能手机 6GB+64GB 黑色 全网通4G 双卡双待",
+  "productSubTitle": "骁龙845处理器，红外人脸解锁",
+  "productPic": "http://macro-oss.oss-cn-shenzhen.aliyuncs.com/mall/images/20180615/xiaomi.jpg",
+  "productAttr": "颜色:黑色;内存:6GB+64GB"
+}
+
+### 11. 第二单：购物车列表
+# @name cartList2
+GET {{baseUrl}}/cart/list
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+### 12. 第二单：生成订单
+# @name createOrder2
+POST {{baseUrl}}/order/generateOrder
+Content-Type: application/json
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+{
+  "cartIds": [{{cartList2.response.body.$.data[0].id}}],
+  "memberReceiveAddressId": {{addressId}},
+  "useIntegration": 0,
+  "payType": 0
+}
+
+### 13. 取消第二单 → 观察 status=4、lock_stock 1→0
+POST {{baseUrl}}/order/cancelUserOrder?orderId={{createOrder2.response.body.$.data.order.id}}
+Authorization: Bearer {{login.response.body.$.data.token}}
+
+### 14. 查询待付款订单列表（可选）
+GET {{baseUrl}}/order/list?status=0&pageNum=1&pageSize=5
+Authorization: Bearer {{login.response.body.$.data.token}}

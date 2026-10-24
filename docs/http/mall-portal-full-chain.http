@@ -1,0 +1,198 @@
+### ============================================================
+### mall-portal 全链路手动验证（IDEA HTTP Client）
+### 用法：在 IDEA 中打开本文件，按顺序点击每个请求左侧的绿色 ▶
+### 说明：脚本会自动把 token / cartId / orderId 存到全局变量，后续请求直接引用
+### 打开方式：IDEA 右侧工具栏 "HTTP Client" 或直接双击本文件
+### ============================================================
+
+### 0. 健康检查（应返回 {"status":"UP"}）
+GET http://localhost:8085/actuator/health
+
+### 1. 会员登录（test / 123456）
+### 观察：返回 tokenHead=Bearer、token=JWT；Redis 中出现 mall:ums:member:test
+POST http://localhost:8085/sso/login
+Content-Type: application/x-www-form-urlencoded
+
+username=test&password=123456
+
+> {%
+  client.test("登录成功", function () {
+    client.assert(response.body.code === 200, "code=" + response.body.code + " msg=" + response.body.message);
+  });
+  client.global.set("token", response.body.data.token);
+%}
+
+### 2. 收货地址列表（自动取默认地址 id）
+### 观察：返回 3 个地址，脚本自动存 addressId
+GET http://localhost:8085/member/address/list
+Authorization: Bearer {{token}}
+
+> {%
+  const list = response.body.data;
+  client.test("地址存在", function () { client.assert(list && list.length > 0, "没有收货地址"); });
+  const addr = list.find(a => a.defaultStatus === 1) || list[0];
+  client.global.set("addressId", addr.id);
+%}
+
+### 3. 商品搜索（不用登录）
+GET http://localhost:8085/product/search?keyword=手机&pageNum=1&pageSize=2
+
+### 4. 商品详情（确认 SKU 99，记下 price=2999 / stock=100，脚本自动存 skuPrice）
+GET http://localhost:8085/product/detail/27
+
+> {%
+  const sku = response.body.data.skuStockList.find(s => s.id === 99);
+  client.test("SKU99 存在", function () { client.assert(!!sku, "商品27下没有SKU99"); });
+  client.global.set("skuPrice", sku.price);
+  client.global.set("productName", response.body.data.product.name);
+%}
+
+### 5. 加购物车前：记录当前购物车最大 id（用于识别新增条目）
+GET http://localhost:8085/cart/list
+Authorization: Bearer {{token}}
+
+> {%
+  const ids = (response.body.data || []).map(i => i.id);
+  client.global.set("cartMaxBefore", ids.length ? Math.max.apply(null, ids) : 0);
+%}
+
+### 6. 加入购物车（商品27 / SKU99 / 1件）
+### 注意：必须带 price/productName 等字段，否则确认订单时会 NPE（真实前端会带）
+POST http://localhost:8085/cart/add
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "productId": 27,
+  "productSkuId": 99,
+  "quantity": 1,
+  "price": {{skuPrice}},
+  "productName": "{{productName}}",
+  "productSubTitle": "骁龙845处理器，红外人脸解锁",
+  "productPic": "http://macro-oss.oss-cn-shenzhen.aliyuncs.com/mall/images/20180615/xiaomi.jpg",
+  "productAttr": "颜色:黑色;内存:6GB+64GB"
+}
+
+> {%
+  client.test("加购成功", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+%}
+
+### 7. 加购后：找出本次新增的 cartId
+GET http://localhost:8085/cart/list
+Authorization: Bearer {{token}}
+
+> {%
+  const before = parseInt(client.global.get("cartMaxBefore") || "0", 10);
+  const item = (response.body.data || []).find(i => i.id > before);
+  client.test("拿到新增 cartId", function () { client.assert(!!item, "没找到新增购物车条目"); });
+  client.global.set("cartId", item.id);
+  client.log("本次购物车条目 id=" + client.global.get("cartId") + " price=" + item.price);
+%}
+
+### 8. 确认订单（结算页：算价 / 可用优惠券 / 地址）
+POST http://localhost:8085/order/generateConfirmOrder
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+[{{cartId}}]
+
+> {%
+  client.test("确认订单成功", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+  client.log("应付金额 = " + response.body.data.calcAmount.payAmount);
+%}
+
+### 9. 生成订单（核心步骤）
+### 观察：status=0 待付款；pms_sku_stock.lock_stock +1；RabbitMQ mall.order.cancel.ttl 出现 1 条消息
+### 注意：不用优惠券时不要传 couponId（传 0 会报"该优惠券不可用"）
+POST http://localhost:8085/order/generateOrder
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "cartIds": [{{cartId}}],
+  "memberReceiveAddressId": {{addressId}},
+  "useIntegration": 0,
+  "payType": 0
+}
+
+> {%
+  client.test("下单成功", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+  const order = response.body.data.order;
+  client.global.set("orderId", order.id);
+  client.global.set("orderSn", order.orderSn);
+  client.log("订单 id=" + order.id + " 订单号=" + order.orderSn + " 状态=" + order.status + " 应付=" + order.payAmount);
+%}
+
+### 10. 模拟支付成功（回调模拟：status 0->1，扣减真实库存 + 释放锁定库存）
+POST http://localhost:8085/order/paySuccess?orderId={{orderId}}&payType=0
+Authorization: Bearer {{token}}
+
+> {%
+  client.test("支付成功", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+%}
+
+### 11. 第二单：再加购一次（用于验证取消/释放库存）
+POST http://localhost:8085/cart/add
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "productId": 27,
+  "productSkuId": 99,
+  "quantity": 1,
+  "price": {{skuPrice}},
+  "productName": "{{productName}}",
+  "productSubTitle": "骁龙845处理器，红外人脸解锁",
+  "productPic": "http://macro-oss.oss-cn-shenzhen.aliyuncs.com/mall/images/20180615/xiaomi.jpg",
+  "productAttr": "颜色:黑色;内存:6GB+64GB"
+}
+
+### 12. 第二单：记录加购前的最大 cartId
+GET http://localhost:8085/cart/list
+Authorization: Bearer {{token}}
+
+> {%
+  const ids = (response.body.data || []).map(i => i.id);
+  client.global.set("cartMaxBefore2", ids.length ? Math.max.apply(null, ids) : 0);
+%}
+
+### 13. 第二单：找出新增 cartId2
+GET http://localhost:8085/cart/list
+Authorization: Bearer {{token}}
+
+> {%
+  const before = parseInt(client.global.get("cartMaxBefore2") || "0", 10);
+  const item = (response.body.data || []).find(i => i.id > before);
+  client.test("拿到新增 cartId2", function () { client.assert(!!item, "没找到新增购物车条目"); });
+  client.global.set("cartId2", item.id);
+%}
+
+### 14. 第二单：生成订单
+POST http://localhost:8085/order/generateOrder
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "cartIds": [{{cartId2}}],
+  "memberReceiveAddressId": {{addressId}},
+  "useIntegration": 0,
+  "payType": 0
+}
+
+> {%
+  client.test("第二单生成", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+  client.global.set("orderId2", response.body.data.order.id);
+  client.log("第二单 id=" + response.body.data.order.id);
+%}
+
+### 15. 取消未支付订单（应 status=4 已关闭，并释放 lock_stock）
+POST http://localhost:8085/order/cancelUserOrder?orderId={{orderId2}}
+Authorization: Bearer {{token}}
+
+> {%
+  client.test("取消成功", function () { client.assert(response.body.code === 200, "msg=" + response.body.message); });
+%}
+
+### 16. 查询订单列表（status=0 待付款，可选：看历史订单）
+GET http://localhost:8085/order/list?status=0&pageNum=1&pageSize=5
+Authorization: Bearer {{token}}

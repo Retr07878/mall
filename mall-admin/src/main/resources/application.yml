@@ -33,8 +33,11 @@ redis:
 secure:
   ignored:
     urls: #安全路径白名单
-      - /swagger-ui/
-      - /v3/api-docs/*
+      - /swagger-ui.html
+      - /swagger-ui/**
+      - /v3/api-docs/**
+      - /webjars/**
+      - /error
       - /*/*.html
       - /*/*.js
       - /*/*.css
